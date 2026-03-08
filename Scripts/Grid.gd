@@ -1,5 +1,7 @@
 extends Node2D
 
+enum Cell { EMPTY, FLOOR, MONSTER, CHEST }
+
 const GRID_SIZE := 10
 const CELL_SIZE := 60
 const GRID_OFFSET := Vector2(50.0, 80.0)
@@ -10,28 +12,61 @@ const COLOR_LINE    := Color(0.45, 0.45, 0.55, 0.45)
 const COLOR_OK      := Color(0.35, 0.80, 0.40, 0.55)
 const COLOR_BAD     := Color(0.85, 0.25, 0.25, 0.55)
 const COLOR_TEXT    := Color(0.92, 0.87, 0.70)
+const COLOR_START   := Color(0.0, 0.535, 0.093, 1.0)
+const COLOR_END     := Color(0.645, 0.0, 0.24, 1.0)
+const COLOR_EXPLORER := Color(0.95, 0.90, 0.25)
+const FOG_RADIUS    := 2
 
-var grid: Array = [] #GRID OF TRUE IF WAY OR FALSE
-var current_shape: int = 1 #SHAPE TO DRAW DUNGEON (LINE OR ZIGZAG)
-var hover_cell := Vector2i(-1, -1) #CELL NO IN GRID
+var grid: Array = []  # Array[Array[Cell]]
+var current_shape: int = 1
+var hover_cell := Vector2i(-1, -1)
+
+var start_cell   := Vector2i(-1, -1)
+var end_cell     := Vector2i(-1, -1)
+
+var explore_mode := false
+var explorer_pos := Vector2i(-1, -1)
 
 var shapes := {
-	1: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0)], # LINE
-	2: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(1, 1), Vector2i(2, 1)] # ZIGZAG
+	1: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0)],
+	2: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(1, 1), Vector2i(2, 1)]
 }
 
+var shape_map := { "line": 1, "zigzag": 2 }
 
-func _ready() -> void: # CREATE A EMPTY GRID OF GRID_SIZE x GRID_SIZE
+
+func _ready() -> void:
 	grid.resize(GRID_SIZE)
 	for row in range(GRID_SIZE):
 		grid[row] = []
 		grid[row].resize(GRID_SIZE)
-		grid[row].fill(false)
+		grid[row].fill(Cell.EMPTY)
+	_place_special_cells()
 
-var shape_map := { "line": 1, "zigzag": 2 }
+
+func _place_special_cells() -> void:
+	start_cell = Vector2i(randi() % GRID_SIZE, randi() % GRID_SIZE)
+	while true:
+		end_cell = Vector2i(randi() % GRID_SIZE, randi() % GRID_SIZE)
+		var dist: int = abs(end_cell.x - start_cell.x) + abs(end_cell.y - start_cell.y)
+		if dist >= 6:
+			break
+
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo: #CHANGE SHAPE WITH INPUT CONTROLLER
+	if event.is_action_pressed("explore"):
+		explore_mode = not explore_mode
+		if explore_mode:
+			explorer_pos = start_cell
+		queue_redraw()
+		return
+
+	if explore_mode:
+		_handle_explore_input(event)
+		return
+
+	# --- Mode construction ---
+	if event is InputEventKey and event.pressed and not event.echo:
 		for action in shape_map:
 			if event.is_action(action):
 				current_shape = shape_map[action]
@@ -47,6 +82,26 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 			_place_shape(hover_cell)
+
+
+func _handle_explore_input(event: InputEvent) -> void:
+	var dir := Vector2i(0, 0)
+	if event.is_action_pressed("ui_right"): dir = Vector2i(1, 0)
+	elif event.is_action_pressed("ui_left"): dir = Vector2i(-1, 0)
+	elif event.is_action_pressed("ui_down"): dir = Vector2i(0, 1)
+	elif event.is_action_pressed("ui_up"):   dir = Vector2i(0, -1)
+	if dir == Vector2i(0, 0):
+		return
+	var next := explorer_pos + dir
+	if _can_walk(next):
+		explorer_pos = next
+		queue_redraw()
+
+
+func _can_walk(cell: Vector2i) -> bool:
+	if cell.x < 0 or cell.x >= GRID_SIZE or cell.y < 0 or cell.y >= GRID_SIZE:
+		return false
+	return grid[cell.y][cell.x] != Cell.EMPTY or cell == start_cell or cell == end_cell
 
 
 func _get_cell_at(screen_pos: Vector2) -> Vector2i:
@@ -69,7 +124,9 @@ func _is_valid(cells: Array[Vector2i]) -> bool:
 	for cell in cells:
 		if cell.x < 0 or cell.x >= GRID_SIZE or cell.y < 0 or cell.y >= GRID_SIZE:
 			return false
-		if grid[cell.y][cell.x]:
+		if grid[cell.y][cell.x] != Cell.EMPTY:
+			return false
+		if cell == start_cell or cell == end_cell:
 			return false
 	return true
 
@@ -80,27 +137,55 @@ func _place_shape(anchor: Vector2i) -> void:
 	var cells := _get_shape_cells(anchor)
 	if _is_valid(cells):
 		for cell in cells:
-			grid[cell.y][cell.x] = true
+			grid[cell.y][cell.x] = Cell.FLOOR
 		queue_redraw()
 
 
 func _draw() -> void:
+	var font      := ThemeDB.fallback_font
+	var font_size := 15
+
+	# Cellules
 	for row in range(GRID_SIZE):
 		for col in range(GRID_SIZE):
-			var pos := GRID_OFFSET + Vector2(col * CELL_SIZE, row * CELL_SIZE)
+			var pos  := GRID_OFFSET + Vector2(col * CELL_SIZE, row * CELL_SIZE)
 			var rect := Rect2(pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2))
-			var color := COLOR_FILLED if grid[row][col] else COLOR_EMPTY
+			var cell_type: Cell = grid[row][col]
+			var color: Color = COLOR_FILLED if cell_type != Cell.EMPTY else COLOR_EMPTY
+
+			if explore_mode:
+				var dist: int = maxi(abs(col - explorer_pos.x), abs(row - explorer_pos.y))
+				if dist > FOG_RADIUS:
+					color = color.darkened(0.75)
+
 			draw_rect(rect, color)
 
-	if hover_cell != Vector2i(-1, -1):
-		var preview_cells := _get_shape_cells(hover_cell)
-		var valid := _is_valid(preview_cells)
-		var preview_color := COLOR_OK if valid else COLOR_BAD
-		for cell in preview_cells:
-			if cell.x >= 0 and cell.x < GRID_SIZE and cell.y >= 0 and cell.y < GRID_SIZE:
-				var pos := GRID_OFFSET + Vector2(cell.x * CELL_SIZE, cell.y * CELL_SIZE)
-				draw_rect(Rect2(pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2)), preview_color)
+	# Départ
+	var s_pos := GRID_OFFSET + Vector2(start_cell.x * CELL_SIZE, start_cell.y * CELL_SIZE)
+	draw_rect(Rect2(s_pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2)), COLOR_START)
+	draw_string(font, s_pos + Vector2(14, 40), "S", HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color.WHITE)
 
+	# Fin
+	var e_pos := GRID_OFFSET + Vector2(end_cell.x * CELL_SIZE, end_cell.y * CELL_SIZE)
+	draw_rect(Rect2(e_pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2)), COLOR_END)
+	draw_string(font, e_pos + Vector2(14, 40), "F", HORIZONTAL_ALIGNMENT_LEFT, -1, 28, Color(0.1, 0.1, 0.1))
+
+	if explore_mode:
+		var ex_center := GRID_OFFSET + Vector2(
+			explorer_pos.x * CELL_SIZE + CELL_SIZE * 0.5,
+			explorer_pos.y * CELL_SIZE + CELL_SIZE * 0.5)
+		draw_circle(ex_center, CELL_SIZE * 0.28, COLOR_EXPLORER)
+	else:
+		if hover_cell != Vector2i(-1, -1):
+			var preview_cells := _get_shape_cells(hover_cell)
+			var valid         := _is_valid(preview_cells)
+			var preview_color := COLOR_OK if valid else COLOR_BAD
+			for cell in preview_cells:
+				if cell.x >= 0 and cell.x < GRID_SIZE and cell.y >= 0 and cell.y < GRID_SIZE:
+					var pos := GRID_OFFSET + Vector2(cell.x * CELL_SIZE, cell.y * CELL_SIZE)
+					draw_rect(Rect2(pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2)), preview_color)
+
+	# Grille
 	var grid_end := GRID_OFFSET + Vector2(GRID_SIZE * CELL_SIZE, GRID_SIZE * CELL_SIZE)
 	for i in range(GRID_SIZE + 1):
 		var x := GRID_OFFSET.x + i * CELL_SIZE
@@ -108,17 +193,18 @@ func _draw() -> void:
 		draw_line(Vector2(x, GRID_OFFSET.y), Vector2(x, grid_end.y), COLOR_LINE)
 		draw_line(Vector2(GRID_OFFSET.x, y), Vector2(grid_end.x, y), COLOR_LINE)
 
-	var font := ThemeDB.fallback_font
-	var font_size := 15
-	var shape_label := "3 cellules alignées  [ X ][ X ][ X ]" if current_shape == 1 \
-		else "Zigzag  [ X ][ X ]/[ X ][ X ]"
-	draw_string(font,
-		Vector2(GRID_OFFSET.x, 35),
-		"Forme [%d] : %s        (1 = ligne  |  2 = zigzag)" % [current_shape, shape_label],
-		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, COLOR_TEXT)
-
+	# UI texte
 	var legend_y := GRID_OFFSET.y + GRID_SIZE * CELL_SIZE + 25
-	draw_string(font,
-		Vector2(GRID_OFFSET.x, legend_y),
-		"Clic gauche : placer    Vert = OK    Rouge = impossible",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, COLOR_TEXT)
+	if explore_mode:
+		draw_string(font, Vector2(GRID_OFFSET.x, 35),
+			"Mode Exploration  —  Flèches pour se déplacer  —  [E] pour quitter",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, COLOR_TEXT)
+	else:
+		var shape_label := "3 cellules alignées  [ X ][ X ][ X ]" if current_shape == 1 \
+			else "Zigzag  [ X ][ X ]/[ X ][ X ]"
+		draw_string(font, Vector2(GRID_OFFSET.x, 35),
+			"Forme [%d] : %s        (1 = ligne  |  2 = zigzag)" % [current_shape, shape_label],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, COLOR_TEXT)
+		draw_string(font, Vector2(GRID_OFFSET.x, legend_y),
+			"Clic gauche : placer    Vert = OK    Rouge = impossible    [E] Explorer",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, COLOR_TEXT)
